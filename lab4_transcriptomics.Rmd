@@ -1,0 +1,306 @@
+---
+title: "lab4_transcriptomics Myles Taillefer"
+output: html_document
+date: "2025-10-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+lapply(c(
+  "docopt", "DT", "pheatmap","GenomicFeatures", "DESeq2",
+  "edgeR", "systemPipeR", "systemPipeRdata", "BiocStyle", "GO.db", "dplyr",
+  "tidyr", "stringr", "Rqc", "QuasR", "DT", "ape", "clusterProfiler","biomaRt","EnhancedVolcano"
+), require, character.only = TRUE)
+```
+
+
+
+#Question 1
+
+```{r q1, warning = FALSE, message = FALSE }
+# get the path to the fastq files  
+fq_path <- systemPipeRdata::pathList()$fastqdir
+
+# import meta data
+meta_data <- read.table(
+  "/Users/mtaillefer00/Library/R/arm64/4.4/library/systemPipeRdata/extdata/param/targetsPE.txt", 
+  header = TRUE)
+
+#replace string with correct path
+meta_data$FileName1 <- gsub('./data/',fq_path,meta_data$FileName1)
+meta_data$FileName2 <- gsub('./data/',fq_path,meta_data$FileName2)
+
+#display data table
+library('DT')
+DT::datatable(meta_data)
+```
+
+#Question 2
+```{r q2.1, warning = FALSE, message = FALSE}
+
+qc_res <- rqc(path = fq_path, pattern = '.fastq.gz', openBrowser = FALSE)
+rqcCycleQualityBoxPlot(qc_res[0:12])+theme_bw()
+rqcCycleQualityBoxPlot(qc_res[13:24])+theme_bw()
+rqcCycleQualityBoxPlot(qc_res[25:36])+theme_bw()
+```
+
+Reads 27, 29 and 31 are significantly longer (samples: M1A, A1A, V1A).
+The shortest number of cycles is ~75
+
+```{r q2.2}
+rqcCycleBaseCallsLinePlot(qc_res[0:12])
+rqcCycleBaseCallsLinePlot(qc_res[13:24])
+rqcCycleBaseCallsLinePlot(qc_res[25:36])
+```
+sample 34 has many N calls.
+
+#Question 3
+```{r 2.5, warning = FALSE, message = FALSE}
+#create the output file names
+meta_data$processed1 <- sub("^/Users/mtaillefer00/Library/R/arm64/4.4/library/systemPipeRdata/extdata/fastq/", "/Users/mtaillefer00/Documents/BIOL_4315_Lab_4_MT/processed_reads/", meta_data$FileName1) 
+meta_data$processed1 <- sub("(\\.fastq\\.gz)$", "_processed\\1", meta_data$processed1) 
+
+```
+
+```{r q3, eval = FALSE}
+#trim and filter the reads
+for(i in 1:nrow(meta_data)){
+  QuasR::preprocessReads(filename = meta_data$FileName1[i],outputFilename = meta_data$processed1[i], truncateEndBases = 3, Lpattern = 'GCCCGGGTAA', nBases = 1)
+} 
+```
+
+#Question 4
+```{r q4, echo=FALSE, message=FALSE, warning=FALSE, results = 'hide'}
+
+##### 5.3 Alignments #####
+
+#5.3.1 Indexing the reference genome
+
+#create the output directory
+dir.create("./hisat2_index", recursive = TRUE)
+
+at_genome <- "data/GCF_000001735.4_TAIR10.1_genomic.fna"
+
+#Use system2 to run hisat2 from within R
+
+tryCatch({system2(command = "hisat2-build", 
+                  args = c("-p","8", at_genome,
+                           "./hisat2_index/tair10_1_index"),
+                  stdout = TRUE, stderr = TRUE)}, error = function(e) {
+                    paste("hisat2-build", "indexing failed with error:", e$message)
+                  })
+
+#5.3.2 Mapping the reads to the indexed genome
+
+#question 4
+
+dir.create("./sam_files",recursive = TRUE)
+dir.create("./bam_files",recursive = TRUE)
+
+meta_data$processedUnzip1 <- sub("\\.gz$", "", meta_data$processed1)
+meta_data$sam1 <- paste('/Users/mtaillefer00/Documents/BIOL_4315_Lab_4_MT/sam_files/',meta_data$SampleName, sep = '')
+meta_data$sam1 <- paste0(meta_data$sam1, '.sam')
+meta_data$hisatLog <- paste('/Users/mtaillefer00/Documents/BIOL_4315_Lab_4_MT/bam_files/',meta_data$SampleName, sep = '')
+meta_data$hisatLog <- paste0(meta_data$hisatLog, '_hisat2.log')
+meta_data$bam1 <- paste('/Users/mtaillefer00/Documents/BIOL_4315_Lab_4_MT/bam_files/',meta_data$SampleName, sep = '')
+meta_data$bam1 <- paste0(meta_data$bam1, '.bam')
+meta_data$bam1sorted <- paste('/Users/mtaillefer00/Documents/BIOL_4315_Lab_4_MT/bam_files/',meta_data$SampleName, sep = '')
+meta_data$bam1sorted <- paste0(meta_data$bam1sorted, '.sorted.bam')
+
+for( i in 1:nrow(meta_data)){
+  hisat2 <- tryCatch({system2("hisat2", 
+                    args = c('-x', 'hisat2_index/tair10_1_index', 
+                             '-U',meta_data$processedUnzip1[i],
+                             '-p', '8',
+                             '-S', meta_data$sam1[i]),
+                    stdout = TRUE, stderr = TRUE)}, 
+                    error = function(e) {
+                      paste("hisat2", "indexing failed with error:", e$message)
+                      })
+  
+ tryCatch({system2('samtools', 
+                           args = c('view', '-bS', meta_data$sam1[i], '-o', meta_data$bam1[i]),
+                   stdout = TRUE, stderr = TRUE)}, 
+                   error = function(e) {
+                             paste("samtools", "sam>bam failed with error:", e$message)
+                           })
+  
+  tryCatch({system2('samtools', 
+                           args = c('sort', meta_data$bam1[i], '-o', meta_data$bam1sorted[i]),
+                    stdout = TRUE, stderr = TRUE)}, 
+                    error = function(e) {
+                      paste("samtools", "sorting failed with error:", e$message)
+                    })
+  
+  tryCatch({system2('samtools', 
+                           args = c('index', meta_data$bam1sorted[i]),
+                    stdout = TRUE, stderr = TRUE)}, 
+                    error = function(e) {
+                      paste("samtools", "indexing failed with error:", e$message)
+                  })
+  writeLines(hisat2,meta_data$hisatLog[i])
+}
+```
+
+#question 5
+```{r q5, warning = FALSE, message = FALSE}
+
+# get the folder
+hisat2_logs_dir <- "bam_files/"
+
+# 1. Get a list of all HISAT2 log files
+log_files <- list.files(hisat2_logs_dir, pattern = "*.log", full.names = TRUE)
+
+#preper an "empty" vector of the apropreate size, faster than appending. 
+percent_aligned <- 1:length(log_files)
+
+#loop through log files
+for (i in seq_along(percent_aligned)) {
+  
+  percent_aligned[i] <- readLines(log_files[i])[length(readLines(log_files[i]))]
+  
+}
+
+#bind vectors as dataframe
+align_df <- data.frame(sort(meta_data$SampleName),percent_aligned)
+
+# extract the numeric percent value
+align_df <- align_df %>% 
+  mutate(percent_aligned = as.numeric(
+    stringr::str_split_i(align_df$percent_aligned, "%",1))) %>% 
+  rename(samplename = sort.meta_data.SampleName.)
+
+head(align_df)
+
+#question 5
+#display align_df
+DT::datatable(align_df)
+
+#plot the data
+ggplot(align_df, aes(x = "", y = percent_aligned)) +  
+geom_boxplot() +
+  xlab("") +  
+  ylab("percent aligned") +
+  ggtitle("Boxplot of alignment")
+
+```
+
+#Question 6
+```{r q6, warning = FALSE, message = FALSE}
+#list bam files
+bfiles <- list.files("./bam_files", pattern = ".sorted.bam$", full.names = TRUE)
+
+gene_count_list <- Rsubread::featureCounts(files = bfiles, annot.ext = "data/GCF_000001735.4_TAIR10.1_genomic.gtf", 
+                                           isGTFAnnotationFile = TRUE, # <--- input annotation is GTF
+                                           allowMultiOverlap = FALSE,  # <--- don't allow reads that overlap with multiple loci
+                                           isPairedEnd = FALSE, nthreads = 8,
+                                           minMQS = 10, # <--- minimum mapping quality score of 10 (like a phred score for the hisat2 alignment)
+                                           GTF.featureType = "exon",  # <--- Count reads overlapping 'exon' features
+                                           GTF.attrType = "gene_id" # <--- Groups exon by gene id
+)
+count_table <- gene_count_list$counts
+
+#drop .sorted.bam from column titles
+colnames(count_table) <- gsub(".sorted\\.bam$", "", colnames(count_table))
+
+#filter out genes not mapped to any reads
+filtered_table <- count_table[rowSums(count_table) != 0, ]
+
+#interactable table
+DT::datatable(filtered_table)
+```
+
+#Question 7
+```{r q7, warning = FALSE, message = FALSE}
+#Get the metadata table that would accompany the count table
+coldata <- meta_data %>% dplyr::select(SampleName,SampleLong,Factor) %>% 
+  dplyr::mutate(SampleLong=str_split_i(SampleLong, "\\.",1)) %>% #getting the groups name (Avirulent, Mock and Virulent)
+  dplyr::rename(condition = SampleLong) %>%
+  dplyr::mutate(condition = factor(condition)) %>% #for group comp
+  dplyr::mutate(Factor = factor(Factor)) #for sample comp
+
+base::rownames(coldata) <- coldata$SampleName
+coldata <- coldata %>% mutate(SampleName = factor(SampleName))
+
+coldata$type <- factor(rep("single-read", nrow(coldata)))
+
+#Make sure samples are in the same order between the two. 
+coldata <- coldata[base::match(base::colnames(count_table), rownames(coldata)),]
+
+#Check that they are indeed same order
+all(rownames(coldata) == base::colnames(count_table))
+
+#creating a dds object where the conditions are avr vs mock vs vir
+
+#creating a dds object where the conditions are the samples themslevs 
+dds2 <- DESeqDataSetFromMatrix(countData = count_table,
+                               colData = coldata,
+                               design = ~ Factor)
+dds2_results <- DESeq(dds2)
+comp <- systemPipeR::readComp("/Users/mtaillefer00/Library/R/arm64/4.4/library/systemPipeRdata/extdata/param/targetsPE.txt")
+comp[[1]]
+compPair <- comp[[1]]
+
+# Function to filter and count DE genes
+filter_and_count <- function(res_obj, comparison_name, fc_threshold = 2) {
+  # Remove NAs
+  res_filtered <- res_obj[!is.na(res_obj$padj) & !is.na(res_obj$log2FoldChange), ]
+  
+  # Apply filters: |log2FC| >= log2(2) = 1 and padj <= alpha (already set in results())
+  sig_genes <- res_filtered[abs(res_filtered$log2FoldChange) >= log2(fc_threshold), ]
+  
+  # Count up and down regulated
+  up_regulated <- sum(sig_genes$log2FoldChange > 0)
+  down_regulated <- sum(sig_genes$log2FoldChange < 0)
+  
+  return(data.frame(
+    Comparison = comparison_name,
+    Up_regulated = up_regulated,
+    Down_regulated = down_regulated
+  ))
+}
+
+results <- list()
+for (pair in compPair){
+  groups <- unlist(strsplit(pair,'-'))
+  gr1 <- groups[1]
+  gr2 <- groups[2]
+  compName <- paste(gr1, 'vs', gr2)
+  res <- DESeq2::results(dds2_results, contrast = c("Factor", gr1, gr2), alpha = 0.2)
+  filtered_data <- filter_and_count(res, compName)
+  results[[compName]] <- filtered_data
+}
+
+results_summary2 <- do.call(rbind, results)
+
+plot_data2 <- results_summary2 %>%
+  pivot_longer(cols = c(Up_regulated, Down_regulated),
+               names_to = "Regulation",
+               values_to = "Count") %>%
+  mutate(Regulation = factor(Regulation, levels = c("Up_regulated", "Down_regulated")))
+
+p_2 <- ggplot(plot_data2, aes(x = Comparison, y = Count, fill = Regulation)) +
+  geom_bar(stat = "identity", position = "stack") +
+  coord_flip() +
+  labs(
+    title = "Differentially Expressed Genes by Sample Comparison dd2",
+    subtitle = "Fold Change >= 2,, alpha = 0.2",
+    x = "Comparison",
+    y = "Number of Genes",
+    fill = "Regulation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10))
+
+p_2
+```
+
+#Question 8
+When calculating Spearman correlation using all genes, we did not observe samples of the same type clustering together, whereas we do observe clustering of related samples when we calculated the correlation only using differentially expressed genes. This is since only a small proportion of genes are differentially expressed, so they had little effect on the correlation of all genes. When observing only differentially expressed genes, we can see how the plants are reacting to the different conditions. This matches what we expect biologically. 
+
